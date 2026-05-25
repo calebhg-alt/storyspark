@@ -165,13 +165,13 @@ const WORD_GOALS_BY_GRADE = {
 
 // Typing game passages by grade (index 0 = grade 1)
 const TYPING_PASSAGES = [
-  // Grade 1 — short words, simple sentences
+  // Grade 1 — letters: a s d f j k l and space only
   [
-    "The cat sat on the mat. It was a big fat cat. The cat had a nap.",
-    "My dog can run and jump. He is fun to play with. I love my dog.",
-    "The sun is hot and bright. I can see it in the sky. It makes me warm.",
-    "I like to eat cake. Cake is sweet and soft. My mom made the cake.",
-    "The frog sat by the pond. It was green and small. It jumped in with a splash.",
+    "a sad lad a lad falls ask a dad dad asks a lass a flask a lass",
+    "a fall a sad fall dad asks a lass sad add a flask add a flag",
+    "a lad a flask ask a dad a lass falls a sad fall add a flag",
+    "fall add a flask a dad asks a lad a sad lass a lad falls ask",
+    "a lass a lad dad falls add a flask ask a sad dad add a flag",
   ],
   // Grade 2 — two-clause sentences, common words
   [
@@ -235,6 +235,395 @@ const TYPING_TIME_BY_GRADE = { 1: 90, 2: 90, 3: 75, 4: 75, 5: 60, 6: 60, 7: 45, 
 
 function countWords(text) {
   return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+// ── Space Typing Game ────────────────────────────────────────────
+function SpaceTypingGame({ passage, grade, gradeInfo, onDone, onBack }) {
+  const canvasRef = useRef(null);
+  const inputRef = useRef(null);
+  const stateRef = useRef({
+    typed: "",
+    errors: 0,
+    shipY: 0.5,         // 0=top 1=bottom (normalized)
+    danger: 0,          // 0-1, rises with errors
+    asteroids: [],
+    stars: [],
+    particles: [],
+    started: false,
+    done: false,
+    crashed: false,
+    startTime: null,
+    timeLeft: 0,
+    totalTime: 0,
+    animId: null,
+    lastAsteroid: 0,
+    scrollX: 0,
+  });
+  const [display, setDisplay] = useState({ typed: "", timeLeft: 0, wpm: 0, accuracy: 100, danger: 0, started: false });
+  const totalTime = { 1:90,2:90,3:75,4:75,5:60,6:60,7:45,8:45 }[grade] || 60;
+
+  // Grade-scaled difficulty
+  const diff = {
+    spawnInterval:   [4000,3500,3000,2800,2500,2200,2000,1800][grade-1],
+    asteroidSpeed:   [0.00012,0.00016,0.0002,0.00025,0.0003,0.00035,0.0004,0.00045][grade-1],
+    speedDangerMult: [0.0001,0.00015,0.0002,0.00025,0.0003,0.00035,0.0004,0.00045][grade-1],
+    gravity:         [0.000004,0.000006,0.00001,0.000013,0.000018,0.00002,0.000022,0.000025][grade-1],
+    upImpulse:       [0.006,0.005,0.004,0.0035,0.003,0.0025,0.002,0.0018][grade-1],
+    downImpulse:     [0.0006,0.0007,0.0008,0.001,0.0012,0.0013,0.0014,0.0015][grade-1],
+    velCap:          [0.008,0.007,0.006,0.005,0.004,0.0035,0.003,0.003][grade-1],
+    damping:         [0.88,0.89,0.90,0.91,0.92,0.92,0.93,0.93][grade-1],
+    maxAsteroids:    [1,1,1,2,2,2,3,3][grade-1],
+  };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const S = stateRef.current;
+    S.totalTime = totalTime;
+    S.timeLeft = totalTime;
+    S.diff = diff;
+
+    // Init stars
+    S.stars = Array.from({ length: 80 }, () => ({
+      x: Math.random(), y: Math.random(),
+      size: Math.random() * 2 + 0.5,
+      speed: Math.random() * 0.0003 + 0.0001,
+    }));
+
+    function resize() {
+      canvas.width = canvas.offsetWidth;
+      canvas.height = canvas.offsetHeight;
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    let lastTime = performance.now();
+    let timerAccum = 0;
+
+    function spawnAsteroid(now) {
+      const d = S.diff;
+      if (now - S.lastAsteroid < (d.spawnInterval - S.danger * d.spawnInterval * 0.4)) return;
+      S.lastAsteroid = now;
+      const count = Math.min(d.maxAsteroids, Math.floor(S.danger * d.maxAsteroids) + 1);
+      for (let i = 0; i < count; i++) {
+        // Asteroids only spawn in bottom half (y 0.5 - 0.95)
+        const spawnY = 0.5 + Math.random() * 0.45;
+        S.asteroids.push({
+          x: 1.1 + i * 0.1,
+          y: spawnY,
+          vy: Math.abs((Math.random() - 0.5) * 0.0002), // only drift downward or flat, never up out of bottom half
+          r: (Math.random() * 0.025 + 0.018),
+          speed: d.asteroidSpeed + S.danger * d.speedDangerMult + Math.random() * d.asteroidSpeed * 0.3,
+          rot: Math.random() * Math.PI * 2,
+          rotSpeed: (Math.random() - 0.5) * 0.04,
+          sides: Math.floor(Math.random() * 3) + 6,
+        });
+      }
+    }
+
+    function drawStar(ctx, x, y, r, spikes, inner) {
+      let rot = (Math.PI / 2) * 3, step = Math.PI / spikes;
+      ctx.beginPath();
+      ctx.moveTo(x, y - r);
+      for (let i = 0; i < spikes; i++) {
+        ctx.lineTo(x + Math.cos(rot) * r, y + Math.sin(rot) * r); rot += step;
+        ctx.lineTo(x + Math.cos(rot) * inner, y + Math.sin(rot) * inner); rot += step;
+      }
+      ctx.closePath();
+    }
+
+    function drawAsteroid(ctx, ax, ay, r, rot, sides, W, H) {
+      const px = ax * W, py = ay * H, pr = r * W;
+      ctx.save(); ctx.translate(px, py); ctx.rotate(rot);
+      ctx.beginPath();
+      for (let i = 0; i < sides; i++) {
+        const angle = (i / sides) * Math.PI * 2;
+        const wobble = pr * (0.8 + Math.sin(i * 1.7) * 0.2);
+        const x = Math.cos(angle) * wobble, y = Math.sin(angle) * wobble;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#6b7280"; ctx.fill();
+      ctx.strokeStyle = "#9ca3af"; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawShip(ctx, sx, sy, W, H, danger) {
+      const px = sx * W, py = sy * H;
+      const scale = W * 0.045;
+      ctx.save(); ctx.translate(px, py);
+      // Engine glow
+      const glow = danger > 0.6 ? "#ef4444" : "#22d3ee";
+      ctx.shadowColor = glow; ctx.shadowBlur = 18;
+      // Flame
+      ctx.beginPath();
+      ctx.moveTo(-scale * 0.6, -scale * 0.3);
+      ctx.lineTo(-scale * 1.2 - Math.random() * scale * 0.3, 0);
+      ctx.lineTo(-scale * 0.6, scale * 0.3);
+      ctx.fillStyle = danger > 0.6 ? "#f97316" : "#67e8f9";
+      ctx.fill();
+      // Body
+      ctx.beginPath();
+      ctx.moveTo(scale, 0);
+      ctx.lineTo(-scale * 0.6, -scale * 0.4);
+      ctx.lineTo(-scale * 0.4, 0);
+      ctx.lineTo(-scale * 0.6, scale * 0.4);
+      ctx.closePath();
+      ctx.fillStyle = danger > 0.7 ? "#fca5a5" : "#e0f2fe";
+      ctx.fill();
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.stroke();
+      // Cockpit
+      ctx.beginPath();
+      ctx.ellipse(scale * 0.1, 0, scale * 0.25, scale * 0.18, 0, 0, Math.PI * 2);
+      ctx.fillStyle = danger > 0.6 ? "#fde68a" : "#bae6fd";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function addExplosion(x, y, W, H) {
+      for (let i = 0; i < 20; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 0.004 + 0.001;
+        S.particles.push({
+          x: x, y: y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1, decay: Math.random() * 0.03 + 0.02,
+          r: Math.random() * 0.015 + 0.005,
+          color: ["#f97316","#facc15","#ef4444","#fb923c"][Math.floor(Math.random()*4)],
+        });
+      }
+    }
+
+    function loop(now) {
+      if (S.done) return;
+      const dt = now - lastTime; lastTime = now;
+      const W = canvas.width, H = canvas.height;
+
+      // Timer
+      if (S.started) {
+        timerAccum += dt;
+        if (timerAccum >= 1000) { S.timeLeft = Math.max(0, S.timeLeft - 1); timerAccum -= 1000; }
+        if (S.timeLeft <= 0 && !S.done) { S.done = true; finishGame(false, false); return; }
+      }
+
+      // Scroll stars
+      S.stars.forEach(s => { s.x -= s.speed * dt; if (s.x < 0) { s.x = 1; s.y = Math.random(); } });
+      // Spawn & move asteroids
+      if (S.started) spawnAsteroid(now);
+      S.asteroids = S.asteroids.filter(a => a.x > -0.15);
+      S.asteroids.forEach(a => {
+        a.x -= a.speed * dt;
+        a.y += a.vy * dt;
+        a.rot += a.rotSpeed;
+        // Keep asteroids in bottom half only
+        if (a.y < 0.5) { a.y = 0.5; a.vy = Math.abs(a.vy); }
+        if (a.y > 0.96) { a.y = 0.96; a.vy = -Math.abs(a.vy); }
+      });
+
+      // Ship movement:
+      // - Correct keystrokes pull ship UP (boost applied in handleInput via S.shipVy)
+      // - Errors push ship DOWN
+      // - Natural gravity drifts ship slowly toward center-bottom
+      const d = S.diff;
+      S.shipVy = (S.shipVy || 0);
+      S.shipVy += d.gravity * dt;
+      S.shipVy *= Math.pow(d.damping, dt / 16);
+      S.shipVy = Math.max(-d.velCap, Math.min(d.velCap, S.shipVy));
+      S.shipY += S.shipVy;
+      S.shipY = Math.max(0.06, Math.min(0.92, S.shipY));
+
+      // Collision detection
+      if (S.started && !S.crashed) {
+        const shipPx = 0.15, shipPy = S.shipY, shipR = 0.035;
+        S.asteroids.forEach(a => {
+          const dx = (a.x - shipPx) * W, dy = (a.y - shipPy) * H;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < (shipR + a.r) * W) {
+            addExplosion(shipPx, shipPy, W, H);
+            S.crashed = true; S.done = true;
+            setTimeout(() => finishGame(false, true), 800);
+          }
+        });
+      }
+
+      // Particles
+      S.particles = S.particles.filter(p => p.life > 0);
+      S.particles.forEach(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= p.decay; });
+
+      // ── Draw ──
+      // Background
+      const bg = ctx.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0, "#020617"); bg.addColorStop(1, "#0f0c29");
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+      // Stars
+      S.stars.forEach(s => {
+        ctx.beginPath();
+        ctx.arc(s.x * W, s.y * H, s.size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${0.4 + Math.sin(now * 0.002 + s.x * 10) * 0.3})`;
+        ctx.fill();
+      });
+
+      // Danger zone — red tint at bottom
+      if (S.danger > 0.3) {
+        const dg = ctx.createLinearGradient(0, H * 0.5, 0, H);
+        dg.addColorStop(0, "transparent");
+        dg.addColorStop(1, `rgba(239,68,68,${S.danger * 0.3})`);
+        ctx.fillStyle = dg; ctx.fillRect(0, 0, W, H);
+      }
+
+      // Asteroids
+      S.asteroids.forEach(a => drawAsteroid(ctx, a.x, a.y, a.r, a.rot, a.sides, W, H));
+
+      // Particles
+      S.particles.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x * W, p.y * H, p.r * W, 0, Math.PI * 2);
+        ctx.fillStyle = p.color; ctx.globalAlpha = p.life; ctx.fill(); ctx.globalAlpha = 1;
+      });
+
+      // Ship (hidden if crashed)
+      if (!S.crashed) drawShip(ctx, 0.15, S.shipY, W, H, S.danger);
+
+      // HUD — progress bar
+      const prog = S.typed.length / passage.length;
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(W * 0.05, H * 0.05, W * 0.9, 8);
+      ctx.fillStyle = S.danger > 0.6 ? "#f87171" : "#22d3ee";
+      ctx.fillRect(W * 0.05, H * 0.05, W * 0.9 * prog, 8);
+
+      // Timer
+      ctx.font = `bold ${W * 0.04}px monospace`;
+      ctx.fillStyle = S.timeLeft < 10 ? "#f87171" : "#e2e8f0";
+      ctx.textAlign = "right";
+      ctx.fillText(`${S.timeLeft}s`, W * 0.95, H * 0.12);
+
+      // WPM
+      if (S.started && S.typed.length > 0) {
+        const elapsed = Math.max((Date.now() - S.startTime) / 60000, 0.01);
+        let correct = 0;
+        S.typed.split("").forEach((ch, i) => { if (ch === passage[i]) correct++; });
+        const wpm = Math.round((correct / 5) / elapsed);
+        ctx.textAlign = "left";
+        ctx.font = `bold ${W * 0.03}px monospace`;
+        ctx.fillStyle = "#a78bfa";
+        ctx.fillText(`${wpm} WPM`, W * 0.05, H * 0.12);
+      }
+
+      // "Start typing" prompt
+      if (!S.started) {
+        ctx.textAlign = "center";
+        ctx.font = `bold ${W * 0.035}px sans-serif`;
+        ctx.fillStyle = "rgba(255,255,255,0.7)";
+        ctx.fillText("Start typing to launch! 🚀", W * 0.5, H * 0.88);
+      }
+
+      // Update display state for timer/wpm (low frequency is fine for HUD numbers)
+      if (Math.random() < 0.05) {
+        setDisplay(d => ({ ...d, timeLeft: S.timeLeft, started: S.started }));
+      }
+
+      S.animId = requestAnimationFrame(loop);
+    }
+
+    S.animId = requestAnimationFrame(loop);
+    setTimeout(() => inputRef.current?.focus(), 100);
+
+    return () => {
+      cancelAnimationFrame(S.animId);
+      window.removeEventListener("resize", resize);
+    };
+  }, []);
+
+  function finishGame(completed, crashed) {
+    const S = stateRef.current;
+    S.done = true;
+    cancelAnimationFrame(S.animId);
+    const elapsed = S.startTime ? Math.max((Date.now() - S.startTime) / 60000, 0.01) : 0.01;
+    let correct = 0;
+    S.typed.split("").forEach((ch, i) => { if (ch === passage[i]) correct++; });
+    const wpm = Math.round((correct / 5) / elapsed);
+    const accuracy = S.typed.length ? Math.round(correct / S.typed.length * 100) : 0;
+    onDone({ wpm, accuracy, errors: S.errors, completed, crashed });
+  }
+
+  function handleInput(e) {
+    const val = e.target.value;
+    const S = stateRef.current;
+    if (S.done) return;
+    if (!S.started && val.length > 0) {
+      S.started = true;
+      S.startTime = Date.now();
+      S.shipVy = 0;
+    }
+    // Count new keystrokes
+    if (val.length > S.typed.length) {
+      const idx = val.length - 1;
+      if (val[idx] !== passage[idx]) {
+        S.errors++;
+        S.danger = Math.min(1, S.danger + 0.08);
+        S.shipVy = (S.shipVy || 0) + S.diff.downImpulse;
+      } else {
+        S.danger = Math.max(0, S.danger - 0.025);
+        S.shipVy = (S.shipVy || 0) - S.diff.upImpulse;
+      }
+    }
+    S.typed = val;
+    setDisplay(d => ({ ...d, typed: val, danger: S.danger }));
+    // Completion: typed at least as many chars as passage and all match
+    if (val.length >= passage.length) {
+      let allCorrect = true;
+      for (let i = 0; i < passage.length; i++) {
+        if (val[i] !== passage[i]) { allCorrect = false; break; }
+      }
+      if (allCorrect) { S.done = true; finishGame(true, false); }
+    }
+  }
+
+  // Passage char highlighting — read directly from display.typed (updated synchronously)
+  const typed = display.typed;
+  const nextIdx = typed.length;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Canvas */}
+      <div style={{ position: "relative", width: "100%", height: 220, borderRadius: 16, overflow: "hidden", border: "1.5px solid rgba(34,211,238,0.3)" }}>
+        <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
+      </div>
+
+      {/* Passage text */}
+      <div style={{ background: "rgba(0,0,0,0.4)", borderRadius: 12, padding: "12px 16px", fontFamily: "monospace", fontSize: 15, lineHeight: 1.8, border: "1px solid rgba(255,255,255,0.1)" }}>
+        {passage.split("").map((ch, i) => {
+          const state = i < typed.length ? (typed[i] === ch ? "correct" : "wrong") : i === nextIdx ? "cursor" : "pending";
+          return (
+            <span key={i} style={{
+              color: state === "correct" ? "#86efac" : state === "wrong" ? "#f87171" : state === "cursor" ? "#f0e6ff" : "rgba(255,255,255,0.3)",
+              background: state === "cursor" ? "rgba(167,139,250,0.5)" : state === "wrong" ? "rgba(248,113,113,0.2)" : "transparent",
+              borderRadius: 2,
+            }}>{ch}</span>
+          );
+        })}
+      </div>
+
+      {/* Input — uncontrolled so the browser never lags */}
+      <textarea
+        ref={inputRef}
+        defaultValue=""
+        onChange={handleInput}
+        style={{ width: "100%", minHeight: 70, background: "rgba(255,255,255,0.05)", border: `2px solid ${display.danger > 0.6 ? "#f87171" : "rgba(34,211,238,0.3)"}`, borderRadius: 12, padding: "12px", color: "#f0e6ff", fontSize: 15, fontFamily: "monospace", resize: "none", outline: "none", boxSizing: "border-box", transition: "border-color 0.3s" }}
+        placeholder="Start typing here to launch your rocket! 🚀"
+        spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="off"
+      />
+
+      {/* Keyboard */}
+      <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "12px 16px" }}>
+        <KeyboardDisplay activeChar={nextIdx < passage.length ? passage[nextIdx] : null} />
+      </div>
+    </div>
+  );
 }
 
 // ── Keyboard layout & finger mapping ────────────────────────────
@@ -399,6 +788,7 @@ export default function App() {
 
   // Typing game state
   const [typingPassageIdx, setTypingPassageIdx] = useState(0);
+  const [typingRetryCount, setTypingRetryCount] = useState(0);
   const [typingInput, setTypingInput] = useState("");
   const [typingStartTime, setTypingStartTime] = useState(null);
   const [typingTimeLeft, setTypingTimeLeft] = useState(null);
@@ -534,12 +924,11 @@ export default function App() {
   }
 
   async function callClaude(prompt) {
-    const apiUrl = import.meta.env.VITE_API_URL || "/api/chat";
-    const res = await fetch(apiUrl, {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-sonnet-4-5",
+        model: "claude-sonnet-4-20250514",
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt }],
       }),
@@ -939,83 +1328,30 @@ Write ONLY 2-3 sentences continuing their story with this power-up. Match their 
             <button style={styles.backLink} onClick={() => { clearInterval(typingTimerRef.current); setScreen("home"); }}>← Back</button>
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <span style={{ ...styles.gradePill, borderColor: gradeInfo.color, color: gradeInfo.color }}>{gradeInfo.label} Grade</span>
-              <span style={styles.typingGameLabel}>⌨️ Typing Game</span>
+              <span style={styles.typingGameLabel}>🚀 Space Typing</span>
             </div>
           </div>
 
-          {/* Timer bar */}
-          {typingStartTime && !typingDone && (
-            <div style={styles.progressTrack}>
-              <div style={{ ...styles.progressFill, width: `${timePercent}%`, background: timerColor, transition: "width 1s linear, background 0.5s" }} />
-            </div>
-          )}
+          {/* Space Game Canvas */}
+          <SpaceTypingGame
+            passage={passage}
+            grade={grade}
+            gradeInfo={gradeInfo}
+            onDone={(results) => { setTypingResults(results); setTypingDone(true); }}
+            onBack={() => { clearInterval(typingTimerRef.current); setScreen("home"); }}
+            key={typingPassageIdx + "-" + grade + "-" + typingRetryCount}
+          />
 
-          {/* Stats row */}
-          <div style={styles.typingStatsRow}>
-            <div style={styles.typingStatBox}>
-              <span style={styles.typingStatNum} id="timer-display">
-                {typingDone ? "✓" : typingTimeLeft !== null ? `${typingTimeLeft}s` : `${totalTime}s`}
-              </span>
-              <span style={styles.typingStatLabel}>Time Left</span>
-            </div>
-            <div style={styles.typingStatBox}>
-              <span style={styles.typingStatNum}>
-                {typingInput.length === 0 ? "—" : (() => {
-                  let correct = 0;
-                  typingInput.split("").forEach((ch, i) => { if (ch === passage[i]) correct++; });
-                  return Math.round((correct / Math.max(typingInput.length, 1)) * 100) + "%";
-                })()}
-              </span>
-              <span style={styles.typingStatLabel}>Accuracy</span>
-            </div>
-            <div style={styles.typingStatBox}>
-              <span style={styles.typingStatNum}>
-                {typingStartTime && typingInput.length > 0 ? (() => {
-                  const elapsed = Math.max((Date.now() - typingStartTime) / 1000 / 60, 0.01);
-                  let correct = 0;
-                  typingInput.split("").forEach((ch, i) => { if (ch === passage[i]) correct++; });
-                  return Math.round((correct / 5) / elapsed);
-                })() : "—"}
-              </span>
-              <span style={styles.typingStatLabel}>WPM</span>
-            </div>
-          </div>
-
-          {/* Passage display */}
-          <div style={styles.passageBox}>
-            {!typingDone ? (
-              <p style={styles.passageText}>
-                {passage.split("").map((ch, i) => {
-                  const state = i < typingInput.length
-                    ? (typingInput[i] === ch ? "correct" : "wrong")
-                    : i === typingInput.length ? "cursor" : "pending";
-                  return (
-                    <span key={i} style={{
-                      ...styles.passageChar,
-                      ...(state === "correct" ? styles.charCorrect : {}),
-                      ...(state === "wrong" ? styles.charWrong : {}),
-                      ...(state === "cursor" ? styles.charCursor : {}),
-                    }}>{ch}</span>
-                  );
-                })}
-              </p>
-            ) : (
-              <div style={styles.resultsBox}>
+          {/* Results overlay */}
+          {typingDone && (
+            <div style={styles.spaceResultsOverlay}>
+              <div style={styles.spaceResultsBox}>
                 <div style={styles.resultsEmoji}>{typingResults?.completed ? "🏆" : typingResults?.accuracy >= 90 ? "🌟" : typingResults?.accuracy >= 70 ? "👍" : "💪"}</div>
-                <h2 style={styles.resultsTitle}>{typingResults?.completed ? "Passage Complete!" : "Time's Up!"}</h2>
+                <h2 style={styles.resultsTitle}>{typingResults?.completed ? "Mission Complete!" : typingResults?.crashed ? "Ship Destroyed!" : "Time's Up!"}</h2>
                 <div style={styles.resultsBigStats}>
-                  <div style={styles.resultsStat}>
-                    <span style={styles.resultsStatNum}>{typingResults?.wpm}</span>
-                    <span style={styles.resultsStatLabel}>WPM</span>
-                  </div>
-                  <div style={styles.resultsStat}>
-                    <span style={styles.resultsStatNum}>{typingResults?.accuracy}%</span>
-                    <span style={styles.resultsStatLabel}>Accuracy</span>
-                  </div>
-                  <div style={styles.resultsStat}>
-                    <span style={styles.resultsStatNum}>{typingResults?.errors}</span>
-                    <span style={styles.resultsStatLabel}>Errors</span>
-                  </div>
+                  <div style={styles.resultsStat}><span style={styles.resultsStatNum}>{typingResults?.wpm}</span><span style={styles.resultsStatLabel}>WPM</span></div>
+                  <div style={styles.resultsStat}><span style={styles.resultsStatNum}>{typingResults?.accuracy}%</span><span style={styles.resultsStatLabel}>Accuracy</span></div>
+                  <div style={styles.resultsStat}><span style={styles.resultsStatNum}>{typingResults?.errors}</span><span style={styles.resultsStatLabel}>Errors</span></div>
                 </div>
                 <p style={styles.resultsFeedback}>
                   {typingResults?.accuracy >= 95 ? "🔥 Incredible accuracy! You're a typing superstar!" :
@@ -1024,38 +1360,10 @@ Write ONLY 2-3 sentences continuing their story with this power-up. Match their 
                    "💪 Keep practicing! Accuracy beats speed every time!"}
                 </p>
                 <div style={styles.resultsButtons}>
-                  <button style={styles.retryBtn} onClick={() => startTypingGame(typingPassageIdx)}>
-                    🔄 Try Again
-                  </button>
-                  <button style={styles.nextPassageBtn} onClick={() => startTypingGame((typingPassageIdx + 1) % TYPING_PASSAGES[gradeIdx].length)}>
-                    Next Passage →
-                  </button>
+                  <button style={styles.retryBtn} onClick={() => { setTypingDone(false); setTypingResults(null); setTypingRetryCount(c => c + 1); }}>🔄 Try Again</button>
+                  <button style={styles.nextPassageBtn} onClick={() => { setTypingDone(false); setTypingResults(null); setTypingRetryCount(c => c + 1); setTypingPassageIdx(p => (p + 1) % TYPING_PASSAGES[gradeIdx].length); }}>Next Passage →</button>
                 </div>
               </div>
-            )}
-          </div>
-
-          {/* Input */}
-          {!typingDone && (
-            <textarea
-              ref={typingInputRef}
-              style={styles.typingInput}
-              value={typingInput}
-              onChange={e => handleTypingInput(e.target.value)}
-              placeholder={typingStartTime ? "" : "Start typing to begin the timer…"}
-              spellCheck={false}
-              autoCorrect="off"
-              autoCapitalize="off"
-            />
-          )}
-
-          {/* Keyboard */}
-          {!typingDone && (
-            <div style={styles.keyboardWrap}>
-              <KeyboardDisplay activeChar={(() => {
-                const nextIdx = typingInput.length;
-                return nextIdx < passage.length ? passage[nextIdx] : null;
-              })()} />
             </div>
           )}
 
@@ -1065,11 +1373,7 @@ Write ONLY 2-3 sentences continuing their story with this power-up. Match their 
               <span style={styles.sectionLabel}>📄 Passages</span>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
                 {TYPING_PASSAGES[gradeIdx].map((_, i) => (
-                  <button
-                    key={i}
-                    style={{ ...styles.passagePickBtn, ...(i === typingPassageIdx % TYPING_PASSAGES[gradeIdx].length ? styles.passagePickBtnActive : {}) }}
-                    onClick={() => startTypingGame(i)}
-                  >
+                  <button key={i} style={{ ...styles.passagePickBtn, ...(i === typingPassageIdx % TYPING_PASSAGES[gradeIdx].length ? styles.passagePickBtnActive : {}) }} onClick={() => { setTypingDone(false); setTypingResults(null); setTypingRetryCount(c => c + 1); setTypingPassageIdx(i); }}>
                     {i + 1}
                   </button>
                 ))}
@@ -1345,6 +1649,8 @@ const styles = {
   passagePickBtn: { width: 34, height: 34, borderRadius: 8, border: "1.5px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.06)", color: "#c4b5fd", fontWeight: 800, cursor: "pointer", fontSize: 13 },
   passagePickBtnActive: { background: "rgba(34,211,238,0.2)", border: "1.5px solid #22d3ee", color: "#67e8f9" },
   keyboardWrap: { background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "14px 16px" },
+  spaceResultsOverlay: { position: "fixed", inset: 0, zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.75)", animation: "fadeIn 0.3s ease" },
+  spaceResultsBox: { background: "linear-gradient(135deg, #0f0c29, #1a1040)", border: "2px solid rgba(167,139,250,0.4)", borderRadius: 24, padding: "32px 40px", textAlign: "center", maxWidth: 400, width: "90%" },
 
   // Results
   resultsBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: "10px 0" },
