@@ -238,7 +238,7 @@ function countWords(text) {
 }
 
 // ── Space Typing Game ────────────────────────────────────────────
-function SpaceTypingGame({ passage, grade, gradeInfo, onDone, onBack }) {
+function SpaceTypingGame({ passage, grade, gradeInfo, difficulty = "normal", onDone, onBack }) {
   const canvasRef = useRef(null);
   const inputRef = useRef(null);
   const stateRef = useRef({
@@ -260,19 +260,28 @@ function SpaceTypingGame({ passage, grade, gradeInfo, onDone, onBack }) {
     scrollX: 0,
   });
   const [display, setDisplay] = useState({ typed: "", timeLeft: 0, wpm: 0, accuracy: 100, danger: 0, started: false });
-  const totalTime = { 1:90,2:90,3:75,4:75,5:60,6:60,7:45,8:45 }[grade] || 60;
+  const baseTimes = { 1:120,2:120,3:105,4:105,5:90,6:90,7:90,8:90 };
+  const timeMultiplier = difficulty === "easy" ? 1.5 : difficulty === "hard" ? 0.55 : 1.0;
+  const totalTime = Math.round((baseTimes[grade] || 90) * timeMultiplier);
+
+  // Difficulty multipliers
+  const diffMult = difficulty === "easy"
+    ? { speed: 0.15, spawn: 4.0, gravity: 0.1, upImpulse: 2.5, downImpulse: 0.2, maxAsteroids: 0.3 }
+    : difficulty === "hard"
+    ? { speed: 2.0, spawn: 0.6, gravity: 2.0, upImpulse: 0.7, downImpulse: 1.8, maxAsteroids: 2.0 }
+    : { speed: 1.0, spawn: 1.0, gravity: 1.0, upImpulse: 1.0, downImpulse: 1.0, maxAsteroids: 1.0 };
 
   // Grade-scaled difficulty
   const diff = {
-    spawnInterval:   [4000,3500,3000,2800,2500,2200,2000,1800][grade-1],
-    asteroidSpeed:   [0.00012,0.00016,0.0002,0.00025,0.0003,0.00035,0.0004,0.00045][grade-1],
-    speedDangerMult: [0.0001,0.00015,0.0002,0.00025,0.0003,0.00035,0.0004,0.00045][grade-1],
-    gravity:         [0.000004,0.000006,0.00001,0.000013,0.000018,0.00002,0.000022,0.000025][grade-1],
-    upImpulse:       [0.006,0.005,0.004,0.0035,0.003,0.0025,0.002,0.0018][grade-1],
-    downImpulse:     [0.0006,0.0007,0.0008,0.001,0.0012,0.0013,0.0014,0.0015][grade-1],
-    velCap:          [0.008,0.007,0.006,0.005,0.004,0.0035,0.003,0.003][grade-1],
-    damping:         [0.88,0.89,0.90,0.91,0.92,0.92,0.93,0.93][grade-1],
-    maxAsteroids:    [1,1,1,2,2,2,3,3][grade-1],
+    spawnInterval:   [5000,4500,4000,3500,3200,3000,2800,2800][grade-1] * diffMult.spawn,
+    asteroidSpeed:   [0.00008,0.0001,0.00012,0.00015,0.00018,0.0002,0.00020,0.00020][grade-1] * diffMult.speed,
+    speedDangerMult: [0.00005,0.00008,0.0001,0.00012,0.00015,0.00018,0.00018,0.00018][grade-1] * diffMult.speed,
+    gravity:         [0.000002,0.000003,0.000005,0.000007,0.00001,0.000012,0.000013,0.000013][grade-1] * diffMult.gravity,
+    upImpulse:       [0.008,0.007,0.006,0.005,0.0045,0.004,0.0038,0.0038][grade-1] * diffMult.upImpulse,
+    downImpulse:     [0.0004,0.0005,0.0006,0.0007,0.0008,0.0009,0.0009,0.0009][grade-1] * diffMult.downImpulse,
+    velCap:          [0.01,0.009,0.008,0.007,0.006,0.005,0.004,0.004][grade-1],
+    damping:         [0.86,0.87,0.88,0.89,0.90,0.91,0.91,0.92][grade-1],
+    maxAsteroids:    Math.max(1, Math.round([1,1,1,1,2,2,2,3][grade-1] * diffMult.maxAsteroids)),
   };
 
   useEffect(() => {
@@ -542,9 +551,11 @@ function SpaceTypingGame({ passage, grade, gradeInfo, onDone, onBack }) {
     cancelAnimationFrame(S.animId);
     const elapsed = S.startTime ? Math.max((Date.now() - S.startTime) / 60000, 0.01) : 0.01;
     let correct = 0;
-    S.typed.split("").forEach((ch, i) => { if (ch === passage[i]) correct++; });
+    for (let i = 0; i < Math.min(S.typed.length, passage.length); i++) {
+      if (S.typed[i] === passage[i]) correct++;
+    }
     const wpm = Math.round((correct / 5) / elapsed);
-    const accuracy = S.typed.length ? Math.round(correct / S.typed.length * 100) : 0;
+    const accuracy = S.typed.length ? Math.round(correct / Math.min(S.typed.length, passage.length) * 100) : 0;
     onDone({ wpm, accuracy, errors: S.errors, completed, crashed });
   }
 
@@ -557,7 +568,7 @@ function SpaceTypingGame({ passage, grade, gradeInfo, onDone, onBack }) {
       S.startTime = Date.now();
       S.shipVy = 0;
     }
-    // Count new keystrokes
+    // Count new keystrokes — track errors but never block progress
     if (val.length > S.typed.length) {
       const idx = val.length - 1;
       if (val[idx] !== passage[idx]) {
@@ -571,13 +582,16 @@ function SpaceTypingGame({ passage, grade, gradeInfo, onDone, onBack }) {
     }
     S.typed = val;
     setDisplay(d => ({ ...d, typed: val, danger: S.danger }));
-    // Completion: typed at least as many chars as passage and all match
+    // Complete when they've typed enough characters regardless of accuracy
     if (val.length >= passage.length) {
-      let allCorrect = true;
+      // Count total errors for final report
+      let totalErrors = 0;
       for (let i = 0; i < passage.length; i++) {
-        if (val[i] !== passage[i]) { allCorrect = false; break; }
+        if (val[i] !== passage[i]) totalErrors++;
       }
-      if (allCorrect) { S.done = true; finishGame(true, false); }
+      S.errors = totalErrors;
+      S.done = true;
+      finishGame(true, false);
     }
   }
 
@@ -789,6 +803,7 @@ export default function App() {
   // Typing game state
   const [typingPassageIdx, setTypingPassageIdx] = useState(0);
   const [typingRetryCount, setTypingRetryCount] = useState(0);
+  const [typingDifficulty, setTypingDifficulty] = useState("normal");
   const [typingInput, setTypingInput] = useState("");
   const [typingStartTime, setTypingStartTime] = useState(null);
   const [typingTimeLeft, setTypingTimeLeft] = useState(null);
@@ -1326,8 +1341,18 @@ Write ONLY 2-3 sentences continuing their story with this power-up. Match their 
           {/* Header */}
           <div style={styles.writeHeader}>
             <button style={styles.backLink} onClick={() => { clearInterval(typingTimerRef.current); setScreen("home"); }}>← Back</button>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ ...styles.gradePill, borderColor: gradeInfo.color, color: gradeInfo.color }}>{gradeInfo.label} Grade</span>
+              {/* Difficulty selector */}
+              {["easy","normal","hard"].map(d => (
+                <button key={d} onClick={() => { setTypingDifficulty(d); setTypingRetryCount(c => c + 1); setTypingDone(false); setTypingResults(null); }}
+                  style={{ padding: "3px 10px", borderRadius: 999, border: "none", fontWeight: 800, fontSize: 11, cursor: "pointer", textTransform: "capitalize",
+                    background: typingDifficulty === d
+                      ? d === "easy" ? "#4ade80" : d === "normal" ? "#a78bfa" : "#f87171"
+                      : "rgba(255,255,255,0.1)",
+                    color: typingDifficulty === d ? "#fff" : "rgba(255,255,255,0.5)",
+                  }}>{d === "easy" ? "🟢 Easy" : d === "normal" ? "🟣 Normal" : "🔴 Hard"}</button>
+              ))}
               <span style={styles.typingGameLabel}>🚀 Space Typing</span>
             </div>
           </div>
@@ -1337,6 +1362,7 @@ Write ONLY 2-3 sentences continuing their story with this power-up. Match their 
             passage={passage}
             grade={grade}
             gradeInfo={gradeInfo}
+            difficulty={typingDifficulty}
             onDone={(results) => { setTypingResults(results); setTypingDone(true); }}
             onBack={() => { clearInterval(typingTimerRef.current); setScreen("home"); }}
             key={typingPassageIdx + "-" + grade + "-" + typingRetryCount}
